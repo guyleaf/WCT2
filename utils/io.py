@@ -3,17 +3,20 @@ from photo_wct.py of https://github.com/NVIDIA/FastPhotoStyle
 Copyright (C) 2018 NVIDIA Corporation.
 Licensed under the CC BY-NC-SA 4.0
 """
-import os
+
 import datetime
+import mimetypes
+import os
+from pathlib import Path
+from typing import Union
 
 import numpy as np
 from PIL import Image
 from torchvision import transforms
-from torchvision.utils import save_image
 
 
 class Timer:
-    def __init__(self, msg='Elapsed time: {}', verbose=True):
+    def __init__(self, msg="Elapsed time: {}", verbose=True):
         self.msg = msg
         self.start_time = None
         self.verbose = verbose
@@ -27,10 +30,12 @@ class Timer:
 
 
 def open_image(image_path, image_size=None):
-    image = Image.open(image_path)
+    image = Image.open(image_path).convert("RGB")
     _transforms = []
     if image_size is not None:
-        image = transforms.Resize(image_size)(image)
+        image = transforms.Resize(
+            image_size, interpolation=transforms.InterpolationMode.LANCZOS
+        )(image)
         # _transforms.append(transforms.Resize(image_size))
     w, h = image.size
     _transforms.append(transforms.CenterCrop((h // 16 * 16, w // 16 * 16)))
@@ -49,7 +54,7 @@ def change_seg(seg):
         (255, 255, 0): 5,  # yellow
         (128, 128, 128): 6,  # grey
         (0, 255, 255): 7,  # lightblue
-        (255, 0, 255): 8  # purple
+        (255, 0, 255): 8,  # purple
     }
     arr_seg = np.asarray(seg)
     new_seg = np.zeros(arr_seg.shape[:-1])
@@ -67,7 +72,7 @@ def change_seg(seg):
                         min_dist_index = color_dict[key]
                     elif dist == min_dist:
                         try:
-                            min_dist_index = new_seg[x, y-1, :]
+                            min_dist_index = new_seg[x, y - 1, :]
                         except Exception:
                             pass
                 new_seg[x, y] = min_dist_index
@@ -77,9 +82,11 @@ def change_seg(seg):
 def load_segment(image_path, image_size=None):
     if not image_path:
         return np.asarray([])
-    image = Image.open(image_path)
+    image = Image.open(image_path).convert("RGB")
     if image_size is not None:
-        transform = transforms.Resize(image_size, interpolation=Image.NEAREST)
+        transform = transforms.Resize(
+            image_size, interpolation=transforms.InterpolationMode.NEAREST
+        )
         image = transform(image)
     w, h = image.size
     transform = transforms.CenterCrop((h // 16 * 16, w // 16 * 16))
@@ -96,12 +103,22 @@ def compute_label_info(content_segment, style_segment):
     label_set = np.unique(content_segment)
     label_indicator = np.zeros(max_label)
     for l in label_set:
-        content_mask = np.where(content_segment.reshape(content_segment.shape[0] * content_segment.shape[1]) == l)
-        style_mask = np.where(style_segment.reshape(style_segment.shape[0] * style_segment.shape[1]) == l)
+        content_mask = np.where(
+            content_segment.reshape(content_segment.shape[0] * content_segment.shape[1])
+            == l
+        )
+        style_mask = np.where(
+            style_segment.reshape(style_segment.shape[0] * style_segment.shape[1]) == l
+        )
 
         c_size = content_mask[0].size
         s_size = style_mask[0].size
-        if c_size > 10 and s_size > 10 and c_size / s_size < 100 and s_size / c_size < 100:
+        if (
+            c_size > 10
+            and s_size > 10
+            and c_size / s_size < 100
+            and s_size / c_size < 100
+        ):
             label_indicator[l] = True
         else:
             label_indicator[l] = False
@@ -112,4 +129,51 @@ def mkdir(dname):
     if not os.path.exists(dname):
         os.makedirs(dname)
     else:
-        assert os.path.isdir(dname), 'alread exists filename {}'.format(dname)
+        assert os.path.isdir(dname), "alread exists filename {}".format(dname)
+
+
+def collect_images(path: Union[str, Path]) -> list[Path]:
+    mime_checker = mimetypes.MimeTypes()
+
+    def validate_file_type(path: Path):
+        mime_type = mime_checker.guess_type(path)[0]
+        return mime_type is not None and mime_type.startswith("image")
+
+    path = Path(path)
+    if path.is_dir():
+        return sorted(filter(validate_file_type, path.rglob("*.*")))
+    else:
+        return [path]
+
+
+def collect_images_from_images(
+    images: list[Union[str, Path]],
+    root_path: Union[str, Path],
+    target_path: Union[str, Path],
+) -> list[Path]:
+    target_path = Path(target_path)
+    if target_path.is_file():
+        return [target_path]
+
+    paths = []
+    exts = [
+        ext
+        for ext, mime_type in mimetypes.types_map.items()
+        if mime_type.startswith("image")
+    ]
+    exts += [ext.upper() for ext in exts]
+    for image in images:
+        image = Path(image)
+        rel_path = image.relative_to(root_path)
+
+        for ext in exts:
+            path = target_path / rel_path.with_suffix(ext)
+            if path.exists():
+                break
+        else:
+            assert (
+                False
+            ), f"The corresponding background image is not found, {rel_path}."
+
+        paths.append(path)
+    return paths
