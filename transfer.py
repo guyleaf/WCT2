@@ -22,11 +22,11 @@ THE SOFTWARE.
 
 import argparse
 import os
+import random
 from pathlib import Path
 
 import torch
 import tqdm
-from torchvision.utils import save_image
 
 from model import WaveDecoder, WaveEncoder
 from utils.core import feature_wct
@@ -37,6 +37,7 @@ from utils.io import (
     compute_label_info,
     load_segment,
     open_image,
+    save_image,
 )
 
 
@@ -44,17 +45,10 @@ class WCT2:
     def __init__(
         self,
         model_path="./model_checkpoints",
-        transfer_at=["encoder", "skip", "decoder"],
         option_unpool="cat5",
         device="cuda:0",
         verbose=False,
     ):
-        self.transfer_at = set(transfer_at)
-        assert not (
-            self.transfer_at - set(["encoder", "decoder", "skip"])
-        ), "invalid transfer_at: {}".format(transfer_at)
-        assert self.transfer_at, "empty transfer_at"
-
         self.device = torch.device(device)
         self.verbose = verbose
         self.encoder = WaveEncoder(option_unpool).to(self.device)
@@ -86,26 +80,40 @@ class WCT2:
     def decode(self, x, skips, level):
         return self.decoder.decode(x, skips, level)
 
-    def get_all_feature(self, x):
+    def get_all_feature(self, x, transfer_at):
         skips = {}
         feats = {"encoder": {}, "decoder": {}}
         for level in [1, 2, 3, 4]:
             x = self.encode(x, skips, level)
-            if "encoder" in self.transfer_at:
+            if "encoder" in transfer_at:
                 feats["encoder"][level] = x
 
-        if "encoder" not in self.transfer_at:
+        if "encoder" not in transfer_at:
             feats["decoder"][4] = x
         for level in [4, 3, 2]:
             x = self.decode(x, skips, level)
-            if "decoder" in self.transfer_at:
+            if "decoder" in transfer_at:
                 feats["decoder"][level - 1] = x
         return feats, skips
 
-    def transfer(self, content, style, content_segment, style_segment, alpha=1):
+    @torch.inference_mode()
+    def transfer(
+        self,
+        content,
+        style,
+        content_segment,
+        style_segment,
+        alpha=1,
+        transfer_at={"encoder", "skip", "decoder"},
+    ) -> torch.Tensor:
+        assert not (
+            transfer_at - {"encoder", "decoder", "skip"}
+        ), "invalid transfer_at: {}".format(transfer_at)
+        assert transfer_at, "empty transfer_at"
+
         label_set, label_indicator = compute_label_info(content_segment, style_segment)
         content_feat, content_skips = content, {}
-        style_feats, style_skips = self.get_all_feature(style)
+        style_feats, style_skips = self.get_all_feature(style, transfer_at)
 
         wct2_enc_level = [1, 2, 3, 4]
         wct2_dec_level = [1, 2, 3, 4]
@@ -113,7 +121,7 @@ class WCT2:
 
         for level in [1, 2, 3, 4]:
             content_feat = self.encode(content_feat, content_skips, level)
-            if "encoder" in self.transfer_at and level in wct2_enc_level:
+            if "encoder" in transfer_at and level in wct2_enc_level:
                 content_feat = feature_wct(
                     content_feat,
                     style_feats["encoder"][level],
@@ -125,7 +133,7 @@ class WCT2:
                     device=self.device,
                 )
                 self.print_("transfer at encoder {}".format(level))
-        if "skip" in self.transfer_at:
+        if "skip" in transfer_at:
             for skip_level in wct2_skip_level:
                 for component in [0, 1, 2]:  # component: [LH, HL, HH]
                     content_skips[skip_level][component] = feature_wct(
@@ -142,7 +150,7 @@ class WCT2:
 
         for level in [4, 3, 2, 1]:
             if (
-                "decoder" in self.transfer_at
+                "decoder" in transfer_at
                 and level in style_feats["decoder"]
                 and level in wct2_dec_level
             ):
@@ -189,19 +197,30 @@ def run_bulk(config):
         style_fnames = collect_images_from_images(
             content_fnames, config.content, config.style
         )
-
-        if config.content_segment and config.style_segment:
-            content_segment_fnames = collect_images_from_images(
-                content_fnames, config.content, config.content_segment
-            )
-            style_segment_fnames = collect_images_from_images(
-                style_fnames, config.style, config.style_segment
-            )
-        else:
-            content_segment_fnames = [None] * len(content_fnames)
-            style_segment_fnames = [None] * len(style_fnames)
+    elif config.option_mode == "random":
+        content_fnames = collect_images(config.content)
+        style_fnames = random.choices(
+            collect_images(config.style), k=len(content_fnames)
+        )
     else:
         raise NotImplementedError(f"Unsupported mode {config.option_mode}.")
+
+    if config.content_segment and config.style_segment:
+        content_segment_fnames = collect_images_from_images(
+            content_fnames, config.content, config.content_segment
+        )
+        style_segment_fnames = collect_images_from_images(
+            style_fnames, config.style, config.style_segment
+        )
+    else:
+        content_segment_fnames = [None] * len(content_fnames)
+        style_segment_fnames = [None] * len(style_fnames)
+
+    wct2 = WCT2(
+        option_unpool=config.option_unpool,
+        device=device,
+        verbose=config.verbose,
+    )
 
     for _content, _style, _content_segment, _style_segment in tqdm.tqdm(
         zip(content_fnames, style_fnames, content_segment_fnames, style_segment_fnames)
@@ -209,8 +228,11 @@ def run_bulk(config):
         _rel = _content.relative_to(config.content)
         _output: Path = config.output / _rel
 
-        content = open_image(_content, config.image_size).to(device)
-        style = open_image(_style, config.image_size).to(device)
+        content, unpadded_size = open_image(_content, config.image_size)
+        content = content.to(device)
+        style, _ = open_image(_style, config.image_size)
+        style = style.to(device)
+
         content_segment = load_segment(_content_segment, config.image_size)
         style_segment = load_segment(_style_segment, config.image_size)
 
@@ -221,38 +243,36 @@ def run_bulk(config):
 
         for _transfer_at in transfer_ats:
             with Timer("Elapsed time in whole WCT: {}", config.verbose):
-                postfix = "_".join(sorted(list(_transfer_at)))
-                fname_output = _output.with_name(
-                    f"{_rel.stem}_{config.option_unpool}_{postfix}.png"
-                )
-                print("------ transfer:", fname_output)
-                wct2 = WCT2(
-                    transfer_at=_transfer_at,
-                    option_unpool=config.option_unpool,
-                    device=device,
-                    verbose=config.verbose,
-                )
-                with torch.no_grad():
-                    img = wct2.transfer(
-                        content,
-                        style,
-                        content_segment,
-                        style_segment,
-                        alpha=config.alpha,
+                if config.transfer_all:
+                    postfix = "_".join(sorted(list(_transfer_at)))
+                    fname_output = _output.with_name(
+                        f"{_rel.stem}_{config.option_unpool}_{postfix}.png"
                     )
+                else:
+                    fname_output = _output.with_suffix(".png")
 
-                fname_output.parent.mkdir(parents=True, exist_ok=True)
-                save_image(img.clamp_(0, 1), fname_output, padding=0)
+                print("------ transfer:", fname_output)
+                img = wct2.transfer(
+                    content,
+                    style,
+                    content_segment,
+                    style_segment,
+                    alpha=config.alpha,
+                    transfer_at=_transfer_at,
+                )
+                save_image(img.squeeze(0), fname_output, unpadded_size)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("--content", type=str, default="./examples/content")
     parser.add_argument("--content_segment", type=str, default=None)
     parser.add_argument("--style", type=str, default="./examples/style")
     parser.add_argument("--style_segment", type=str, default=None)
     parser.add_argument("--output", type=str, default="./outputs")
-    parser.add_argument("--image_size", type=int, default=512)
+    parser.add_argument("--image_size", type=int, default=None)
     parser.add_argument("--alpha", type=float, default=1)
     parser.add_argument(
         "--option_unpool", type=str, default="cat5", choices=["sum", "cat5"]
@@ -266,9 +286,14 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--transfer_all", action="store_true")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--seed", type=int, default=2024)
     config = parser.parse_args()
 
     print(config)
+
+    random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed_all(config.seed)
 
     """
     CUDA_VISIBLE_DEVICES=6 python transfer.py --content ./examples/content --style ./examples/style --content_segment ./examples/content_segment --style_segment ./examples/style_segment/ --output ./outputs/ --verbose --image_size 512 -a

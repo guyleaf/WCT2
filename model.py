@@ -20,9 +20,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 
 
 def get_wav(in_channels, pool=True):

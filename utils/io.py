@@ -8,11 +8,15 @@ import datetime
 import mimetypes
 import os
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
+import torch
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import functional as F
+
+from .transforms import pad_to_divisible, remove_pad
 
 
 class Timer:
@@ -29,19 +33,31 @@ class Timer:
             print(self.msg.format(datetime.datetime.now() - self.start_time))
 
 
-def open_image(image_path, image_size=None):
+def open_image(image_path: Union[str, Path], image_size: Optional[int] = None):
     image = Image.open(image_path).convert("RGB")
-    _transforms = []
-    if image_size is not None:
-        image = transforms.Resize(
-            image_size, interpolation=transforms.InterpolationMode.LANCZOS
-        )(image)
-        # _transforms.append(transforms.Resize(image_size))
-    w, h = image.size
-    _transforms.append(transforms.CenterCrop((h // 16 * 16, w // 16 * 16)))
-    _transforms.append(transforms.ToTensor())
-    transform = transforms.Compose(_transforms)
-    return transform(image).unsqueeze(0)
+    if image_size is not None and min(image.size) > image_size:
+        image: Image.Image = F.resize(
+            image, image_size, interpolation=transforms.InterpolationMode.LANCZOS
+        )
+
+    original_size = image.size
+    image = pad_to_divisible(image, divisor=16)
+    # _transforms.append(transforms.CenterCrop((h // 16 * 16, w // 16 * 16)))
+    image = F.to_tensor(image)
+    return image.unsqueeze(0), original_size
+
+
+def save_image(
+    image: torch.Tensor, image_path: Union[str, Path], unpadded_size: tuple[int, int]
+):
+    image_path = Path(image_path)
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+
+    image = image.clamp(0, 1)
+    image: Image.Image = F.to_pil_image(image)
+    image = remove_pad(image, *unpadded_size)
+
+    image.save(image_path)
 
 
 def change_seg(seg):
@@ -82,15 +98,20 @@ def change_seg(seg):
 def load_segment(image_path, image_size=None):
     if not image_path:
         return np.asarray([])
-    image = Image.open(image_path).convert("RGB")
-    if image_size is not None:
-        transform = transforms.Resize(
-            image_size, interpolation=transforms.InterpolationMode.NEAREST
+    image = Image.open(image_path)
+    if image.mode == "RGBA":
+        image = image.getchannel("A").convert("RGB")
+    else:
+        image = image.convert("RGB")
+
+    if image_size is not None and min(image.size) > image_size:
+        image: Image.Image = F.resize(
+            image, image_size, interpolation=transforms.InterpolationMode.NEAREST
         )
-        image = transform(image)
-    w, h = image.size
-    transform = transforms.CenterCrop((h // 16 * 16, w // 16 * 16))
-    image = transform(image)
+    # w, h = image.size
+    # transform = transforms.CenterCrop((h // 16 * 16, w // 16 * 16))
+    # image = transform(image)
+    image = pad_to_divisible(image, divisor=16)
     if len(np.asarray(image).shape) == 3:
         image = change_seg(image)
     return np.asarray(image)
