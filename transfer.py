@@ -69,6 +69,8 @@ class WCT2:
                 map_location=lambda storage, loc: storage,
             )
         )
+        self.encoder.eval()
+        self.decoder.eval()
 
     def print_(self, msg):
         if self.verbose:

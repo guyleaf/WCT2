@@ -42,6 +42,9 @@ def open_image(image_path: Union[str, Path], image_size: Optional[int] = None):
 
     original_size = image.size
     image = pad_to_divisible(image, divisor=16)
+    # image = F.center_crop(
+    #     image, (original_size[1] // 16 * 16, original_size[0] // 16 * 16)
+    # )
     # _transforms.append(transforms.CenterCrop((h // 16 * 16, w // 16 * 16)))
     image = F.to_tensor(image)
     return image.unsqueeze(0), original_size
